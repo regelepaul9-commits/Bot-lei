@@ -38,6 +38,9 @@ db_query('''CREATE TABLE IF NOT EXISTS users
 db_query('CREATE TABLE IF NOT EXISTS keys (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, key_val TEXT)')
 db_query('CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, product TEXT, key_val TEXT, date TEXT)')
 
+# Prețuri
+PRICES = {"f1": 25, "f7": 60, "d1": 20, "d7": 50, "wknd": 15}
+
 def get_user_info(uid):
     user = db_query("SELECT balance, is_reseller, has_weekend_pass, joined_date FROM users WHERE user_id = ?", (uid,), fetch=True)
     if not user:
@@ -59,7 +62,6 @@ def main_menu_keyboard(uid):
     
     pass_txt = "\n🎫 Weekend Pass: ✅ ACTIV" if has_pass else ""
     text = f"🏪 **BLESSED PANELS**\n\n🦁 Balanță: `{bal} LEI`\n🏆 Status: `{status}`{pass_txt}\n🆔 ID: `{uid}`"
-    
     return text, builder.as_markup()
 
 # --- HANDLERE ---
@@ -73,18 +75,57 @@ async def back_home(call: types.CallbackQuery):
     text, markup = main_menu_keyboard(call.from_user.id)
     await call.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
 
-@dp.callback_query(F.data == "profile")
-async def profile_menu(call: types.CallbackQuery):
+@dp.callback_query(F.data == "shop")
+async def shop_menu(call: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="🍎 iOS (Fluorite)", callback_data="cat_ios"))
+    builder.row(types.InlineKeyboardButton(text="🤖 Android (Drip)", callback_data="cat_and"))
+    builder.row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="home"))
+    await call.message.edit_text("🌀 **ALEGE PLATFORMA:**", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data == "cat_ios")
+async def ios_menu(call: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="Fluorite 1 Zi - 25 LEI", callback_data="buy_f1"))
+    builder.row(types.InlineKeyboardButton(text="Fluorite 7 Zile - 60 LEI", callback_data="buy_f7"))
+    builder.row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="shop"))
+    await call.message.edit_text("🍎 **PRODUSE iOS:**", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data == "cat_and")
+async def and_menu(call: types.CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    builder.row(types.InlineKeyboardButton(text="Drip 1 Zi - 20 LEI", callback_data="buy_d1"))
+    builder.row(types.InlineKeyboardButton(text="Drip 7 Zile - 50 LEI", callback_data="buy_d7"))
+    builder.row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="shop"))
+    await call.message.edit_text("🤖 **PRODUSE ANDROID:**", reply_markup=builder.as_markup())
+
+@dp.callback_query(F.data.startswith("buy_"))
+async def handle_buy(call: types.CallbackQuery):
+    prod = call.data.replace("buy_", "")
     uid = call.from_user.id
-    bal, _, has_pass, joined = get_user_info(uid)
-    orders = db_query("SELECT product, key_val, date FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 5", (uid,), fetch_all=True)
+    bal, _, has_pass, _ = get_user_info(uid)
     
-    history = "\n".join([f"🔹 {o[0]} - `{o[1]}` ({o[2]})" for o in orders]) if orders else "Nicio achiziție momentan."
-    text = (f"👤 **PROFILUL TĂU**\n\n📅 Membru din: `{joined}`\n💰 Balanță: `{bal} LEI`\n"
-            f"🎫 Weekend Pass: {'✅ Da' if has_pass else '❌ Nu'}\n\n"
-            f"📜 **ULTIMELE 5 CHEI:**\n{history}")
-    
-    await call.message.edit_text(text, reply_markup=InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="home")).as_markup(), parse_mode="Markdown")
+    pret = PRICES.get(prod, 999)
+    if has_pass and prod != "wknd": pret -= 3
+
+    if bal < pret: return await call.answer(f"❌ Ai nevoie de {pret} LEI!", show_alert=True)
+
+    if prod == "wknd":
+        if has_pass: return await call.answer("Ai deja Weekend Pass!", show_alert=True)
+        db_query("UPDATE users SET balance = balance - ?, has_weekend_pass = 1 WHERE user_id = ?", (pret, uid))
+        await call.message.answer("🎁 **Weekend Pass ACTIVAT!**\nAcum ai -3 LEI reducere la orice hack.")
+    else:
+        key = db_query("SELECT id, key_val FROM keys WHERE type = ? LIMIT 1", (prod,), fetch=True)
+        if not key: return await call.answer("❌ STOC EPUIZAT!", show_alert=True)
+        
+        now = datetime.now().strftime("%d/%m %H:%M")
+        db_query("UPDATE users SET balance = balance - ? WHERE user_id = ?", (pret, uid))
+        db_query("DELETE FROM keys WHERE id = ?", (key[0],))
+        db_query("INSERT INTO orders (user_id, product, key_val, date) VALUES (?, ?, ?, ?)", (uid, prod, key[1], now))
+        await call.message.answer(f"✅ **ACHIZIȚIE REUȘITĂ!**\n\n🔑 CHEIE: `{key[1]}`")
+
+    text, markup = main_menu_keyboard(uid)
+    await call.message.edit_text(text, reply_markup=markup, parse_mode="Markdown")
 
 @dp.message(Command("add"))
 async def add_money(m: types.Message):
@@ -92,24 +133,9 @@ async def add_money(m: types.Message):
     try:
         parts = m.text.split()
         tid, suma = int(parts[1]), float(parts[2])
-        get_user_info(tid) # ne asigurăm că există în DB
         db_query("UPDATE users SET balance = balance + ? WHERE user_id = ?", (suma, tid))
         await m.answer(f"✅ Adăugat {suma} LEI lui `{tid}`.")
-        try: await bot.send_message(tid, f"💳 Ai primit `{suma} LEI`!")
-        except: pass
     except: await m.answer("Sintaxă: `/add ID SUMA`")
-
-@dp.callback_query(F.data == "shop")
-async def shop_menu(call: types.CallbackQuery):
-    builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="🍎 iOS", callback_data="cat_ios"), types.InlineKeyboardButton(text="🤖 Android", callback_data="cat_and"))
-    builder.row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="home"))
-    await call.message.edit_text("🌀 **MAGAZIN BLESSED:**", reply_markup=builder.as_markup())
-
-@dp.callback_query(F.data == "add_info")
-async def add_info(call: types.CallbackQuery):
-    await call.message.edit_text(f"💳 **REÎNCĂRCARE**\n\nTrimite suma la @zenoficiall\nID-ul tău: `{call.from_user.id}`", 
-                                 reply_markup=InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="home")).as_markup())
 
 async def main():
     logging.basicConfig(level=logging.INFO)
