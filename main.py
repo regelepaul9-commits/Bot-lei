@@ -25,7 +25,7 @@ def db_query(query, params=(), fetch=False, fetch_all=False):
     finally:
         conn.close()
 
-# Creare tabele
+# Init Tables
 db_query('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance REAL DEFAULT 0.0, is_admin INTEGER DEFAULT 0, has_weekend_pass INTEGER DEFAULT 0)')
 db_query('CREATE TABLE IF NOT EXISTS keys (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, key_val TEXT)')
 db_query('CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, product TEXT, key_val TEXT, date TEXT)')
@@ -34,13 +34,13 @@ db_query('CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY AUTOINCREMEN
 PRICES = {
     "d1": 4, "d7": 10, "d30": 25, "f1": 5, "f7": 12, "f30": 30,
     "8bp7": 6, "8bp15": 10, "8bp30": 12, "elx7": 3, "elx14": 6, "elx30": 7,
-    "zn7": 5, "zn30": 8.5, "zn60": 15, "wknd": 2 # Weekend Pass: 2 EURO
+    "zn7": 5, "zn30": 8.5, "zn60": 15, "wknd": 2
 }
 
 def get_u(uid):
     res = db_query("SELECT balance, is_admin, has_weekend_pass FROM users WHERE user_id = ?", (uid,), fetch=True)
     if not res:
-        db_query("INSERT INTO users (user_id) VALUES (?)", (uid,))
+        db_query("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (uid,))
         return 0.0, 0, 0
     return res
 
@@ -52,11 +52,48 @@ def main_kb(uid):
     builder.row(types.InlineKeyboardButton(text="🛒 SHOP", callback_data="shop"), types.InlineKeyboardButton(text="👤 PROFIL", callback_data="prof"))
     builder.row(types.InlineKeyboardButton(text="🔥 OFERTE", callback_data="specials"), types.InlineKeyboardButton(text="💳 REÎNCĂRCARE", callback_data="reinc"))
     builder.row(types.InlineKeyboardButton(text="📞 SUPPORT", url="https://t.me/zenoficiall"))
+    
+    if uid == OWNER_ID or is_adm:
+        builder.row(types.InlineKeyboardButton(text="⚙️ ADMIN PANEL", callback_data="admin_stock"))
+    
     txt = f"🏪 **BLESSED PANELS**\n\n🏆 Grad: `{stat}`\n💰 Balanță: `{bal} EUR`"
     if has_p: txt += "\n🎫 Weekend Pass: ✅ ACTIV (-1€ Reducere)"
     return txt, builder.as_markup()
 
-# --- HANDLERS ---
+# --- ADMIN COMMANDS ---
+@dp.message(Command("setadmin"))
+async def set_admin_cmd(m: types.Message):
+    if m.from_user.id == OWNER_ID:
+        try:
+            target_id = int(m.text.split()[1])
+            db_query("UPDATE users SET is_admin = 1 WHERE user_id = ?", (target_id,))
+            await m.answer(f"✅ Utilizatorul `{target_id}` a primit rolul de **ADMIN**.")
+        except:
+            await m.answer("Format: `/setadmin ID`")
+
+@dp.message(Command("addkey"))
+async def add_key_cmd(m: types.Message):
+    _, is_adm, _ = get_u(m.from_user.id)
+    if m.from_user.id == OWNER_ID or is_adm:
+        try:
+            parts = m.text.split(maxsplit=2)
+            db_query("INSERT INTO keys (type, key_val) VALUES (?, ?)", (parts[1], parts[2]))
+            await m.answer(f"✅ Cheie `{parts[1]}` adăugată!")
+        except:
+            await m.answer("Format: `/addkey tip cheie` (ex: `/addkey 8bp7 ABC-123`)")
+
+@dp.message(Command("add"))
+async def add_bal_cmd(m: types.Message):
+    _, is_adm, _ = get_u(m.from_user.id)
+    if m.from_user.id == OWNER_ID or is_adm:
+        try:
+            p = m.text.split()
+            db_query("UPDATE users SET balance = balance + ? WHERE user_id = ?", (float(p[2]), int(p[1])))
+            await m.answer(f"✅ Adăugat {p[2]}€ utilizatorului `{p[1]}`")
+        except:
+            await m.answer("Format: `/add ID SUMA`")
+
+# --- HANDLERS (Shop & Navigare) ---
 @dp.message(Command("start"))
 async def start(m: types.Message):
     t, k = main_kb(m.from_user.id)
@@ -67,6 +104,16 @@ async def home_cb(c: types.CallbackQuery):
     t, k = main_kb(c.from_user.id)
     await c.message.edit_text(t, reply_markup=k, parse_mode="Markdown")
 
+@dp.callback_query(F.data == "admin_stock")
+async def view_stock(c: types.CallbackQuery):
+    counts = db_query("SELECT type, COUNT(*) FROM keys GROUP BY type", fetch_all=True)
+    txt = "📊 **PANEL ADMIN - STOC:**\n\n"
+    if not counts: txt += "Stoc gol ❌"
+    for row in counts: txt += f"🔹 `{row[0]}`: {row[1]} bucăți\n"
+    txt += "\n💡 *Poți folosi /add și /addkey direct în chat.*"
+    b = InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="home"))
+    await c.message.edit_text(txt, reply_markup=b.as_markup(), parse_mode="Markdown")
+
 @dp.callback_query(F.data == "shop")
 async def shop(c: types.CallbackQuery):
     b = InlineKeyboardBuilder()
@@ -76,31 +123,25 @@ async def shop(c: types.CallbackQuery):
     b.row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="home"))
     await c.message.edit_text("🌀 **CATEGORII:**", reply_markup=b.as_markup())
 
-# --- CATEGORII ---
-@dp.callback_query(F.data == "cat_d")
-async def catd(c: types.CallbackQuery):
+@dp.callback_query(F.data == "cat_8")
+async def cat8(c: types.CallbackQuery):
     b = InlineKeyboardBuilder()
-    b.row(types.InlineKeyboardButton(text="1z-4€", callback_data="buy_d1"), types.InlineKeyboardButton(text="7z-10€", callback_data="buy_d7"))
-    b.row(types.InlineKeyboardButton(text="30z-25€", callback_data="buy_d30"))
+    b.row(types.InlineKeyboardButton(text="7z-6€", callback_data="buy_8bp7"), types.InlineKeyboardButton(text="30z-12€", callback_data="buy_8bp30"))
     b.row(types.InlineKeyboardButton(text="⬅️", callback_data="shop"))
-    await c.message.edit_text("🤖 **DRIP ANDROID**", reply_markup=b.as_markup())
+    await c.message.edit_text("🎱 **8 BALL POOL**", reply_markup=b.as_markup())
 
-# --- ACHIZIȚIE ---
 @dp.callback_query(F.data.startswith("buy_"))
 async def handle_buy(c: types.CallbackQuery):
     prod = c.data.replace("buy_", "")
     uid = c.from_user.id
     bal, _, has_p = get_u(uid)
-    
     pret = PRICES.get(prod, 99)
-    if has_p and prod != "wknd": pret = max(0, pret - 1) # Reducere 1 EURO
-
-    if bal < pret: return await c.answer(f"❌ Fonduri insuficiente! ({pret}€)", show_alert=True)
-
+    if has_p and prod != "wknd": pret = max(0, pret - 1)
+    if bal < pret: return await c.answer(f"❌ Ai nevoie de {pret}€!", show_alert=True)
+    
     if prod == "wknd":
-        if has_p: return await c.answer("Ai deja Weekend Pass activ!", show_alert=True)
         db_query("UPDATE users SET balance = balance - ?, has_weekend_pass = 1 WHERE user_id = ?", (pret, uid))
-        await c.message.answer("🎫 **WEEKEND PASS ACTIVAT!**\nAi 1€ reducere la orice produs timp de o săptămână.")
+        await c.message.answer("🎫 **PASS ACTIVAT!**")
     else:
         key = db_query("SELECT id, key_val FROM keys WHERE type = ? LIMIT 1", (prod,), fetch=True)
         if not key: return await c.answer("❌ STOC EPUIZAT!", show_alert=True)
@@ -108,42 +149,24 @@ async def handle_buy(c: types.CallbackQuery):
         db_query("DELETE FROM keys WHERE id = ?", (key[0],))
         db_query("INSERT INTO orders (user_id, product, key_val, date) VALUES (?, ?, ?, ?)", (uid, prod.upper(), key[1], datetime.now().strftime("%d/%m")))
         await c.message.answer(f"✅ **SUCCES!**\n🔑 Cheie: `{key[1]}`")
-
     t, k = main_kb(uid)
     await c.message.edit_text(t, reply_markup=k, parse_mode="Markdown")
 
-# --- PROFIL & REINCARCARE ---
 @dp.callback_query(F.data == "prof")
 async def profile(c: types.CallbackQuery):
     bal, _, has_p = get_u(c.from_user.id)
     orders = db_query("SELECT product, key_val FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT 3", (c.from_user.id,), fetch_all=True)
     history = "\n".join([f"🔹 {o[0]}: `{o[1]}`" for o in orders]) if orders else "Fără achiziții."
-    txt = f"👤 **PROFILUL TĂU**\n\n🆔 ID: `{c.from_user.id}`\n💰 Balanță: `{bal} EUR`\n🎫 Pass: {'✅ Activ' if has_p else '❌ Inactiv'}\n\n📜 **ULTIMELE ACHIZIȚII:**\n{history}"
-    b = InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="home"))
-    await c.message.edit_text(txt, reply_markup=b.as_markup(), parse_mode="Markdown")
+    await c.message.edit_text(f"👤 **PROFIL**\n\n🆔 ID: `{c.from_user.id}`\n💰 Balanță: `{bal} EUR`\n🎫 Pass: {'✅' if has_p else '❌'}\n\n📜 **ISTORIC:**\n{history}", reply_markup=InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="⬅️", callback_data="home")).as_markup())
 
 @dp.callback_query(F.data == "reinc")
 async def reinc(c: types.CallbackQuery):
-    txt = f"💳 **REÎNCĂRCARE CONT**\n\nContact: @zenoficiall\nID-ul tău: `{c.from_user.id}`\n\nMetode: Revolut, Crypto, Paysafe."
-    b = InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="home"))
-    await c.message.edit_text(txt, reply_markup=b.as_markup())
+    await c.message.edit_text(f"💳 **REÎNCĂRCARE**\nContact: @zenoficiall\nID: `{c.from_user.id}`", reply_markup=InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="⬅️", callback_data="home")).as_markup())
 
 @dp.callback_query(F.data == "specials")
 async def specials(c: types.CallbackQuery):
-    b = InlineKeyboardBuilder()
-    b.row(types.InlineKeyboardButton(text="🎫 WEEKEND PASS - 2€", callback_data="buy_wknd"))
-    b.row(types.InlineKeyboardButton(text="⬅️ ÎNAPOI", callback_data="home"))
-    await c.message.edit_text("🔥 **OFERTE SPECIALE**\n\nCumpără Weekend Pass cu 2€ și primești **reducere de 1€** la orice cheie cumpărată!", reply_markup=b.as_markup())
-
-# --- ADMIN ---
-@dp.message(Command("add"))
-async def add(m: types.Message):
-    if m.from_user.id == OWNER_ID or get_u(m.from_user.id)[1]:
-        try:
-            p = m.text.split()
-            db_query("UPDATE users SET balance = balance + ? WHERE user_id = ?", (float(p[2]), int(p[1])))
-            await m.answer(f"✅ Adăugat {p[2]}€ lui {p[1]}")
-        except: pass
+    b = InlineKeyboardBuilder().row(types.InlineKeyboardButton(text="🎫 WEEKEND PASS - 2€", callback_data="buy_wknd")).row(types.InlineKeyboardButton(text="⬅️", callback_data="home"))
+    await c.message.edit_text("🔥 **OFERTE**\n\nWeekend Pass (2€) = -1€ reducere la orice cheie!", reply_markup=b.as_markup())
 
 async def main():
     logging.basicConfig(level=logging.INFO)
